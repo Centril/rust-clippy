@@ -187,6 +187,10 @@ fn focus_on_idx(alternatives: &mut Vec<P<Pat>>, focus_idx: usize) -> bool {
 
     let mut changed = false;
     match &mut focus_kind {
+        // These pattern forms do not have sub-patterns.
+        // Therefore they are not some form of constructor `C`,
+        // with which a pattern `C(P0)` may be formed,
+        // which we would want to join with other `C(Pj)`s.
         PatKind::Ident(_, _, None)
         | PatKind::Lit(_)
         | PatKind::Wild
