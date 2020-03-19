@@ -185,7 +185,8 @@ fn focus_on_idx(alternatives: &mut Vec<P<Pat>>, focus_idx: usize) -> bool {
 
     let start = focus_idx + 1;
 
-    let changed = match &mut focus_kind {
+    let mut changed = false;
+    match &mut focus_kind {
         PatKind::Ident(_, _, None)
         | PatKind::Lit(_)
         | PatKind::Wild
@@ -194,90 +195,104 @@ fn focus_on_idx(alternatives: &mut Vec<P<Pat>>, focus_idx: usize) -> bool {
         | PatKind::Rest
         | PatKind::MacCall(_)
         | PatKind::Or(_)
-        | PatKind::Paren(_) => false,
-        PatKind::Box(target) => extend_with_matching(
-            target,
-            start,
-            alternatives,
-            true,
-            |k| matches!(k, PatKind::Box(_)),
-            |k| always_pat!(k, PatKind::Box(p) => p),
-        ),
-        PatKind::Ref(target, m1) => extend_with_matching(
-            target,
-            start,
-            alternatives,
-            true,
-            |k| matches!(k, PatKind::Ref(_, m2) if m1 == m2),
-            |k| always_pat!(k, PatKind::Ref(p, _) => p),
-        ),
-        PatKind::Ident(b1, i1, Some(target)) => extend_with_matching(
-            target,
-            start,
-            alternatives,
-            true,
-            |k| matches!(k, PatKind::Ident(b2, i2, Some(_)) if b1 == b2 && eq_id(*i1, *i2)),
-            |k| always_pat!(k, PatKind::Ident(_, _, Some(p)) => p),
-        ),
-        PatKind::Slice(ps1) => (0..ps1.len()).any(|idx| {
-            let tail_or = drain_matching(
+        | PatKind::Paren(_) => {},
+        PatKind::Box(target) => {
+            changed |= extend_with_matching(
+                target,
                 start,
                 alternatives,
-                |k| matches!(k, PatKind::Slice(ps2) if eq_pre_post(ps1, ps2, idx)),
-                |k| always_pat!(k, PatKind::Slice(mut ps) => ps.swap_remove(idx)),
+                true,
+                |k| matches!(k, PatKind::Box(_)),
+                |k| always_pat!(k, PatKind::Box(p) => p),
             );
-            extend_with_tail_or(&mut ps1[idx], tail_or, false)
-        }),
-        PatKind::Tuple(ps1) => (0..ps1.len()).any(|idx| {
-            let tail_or = drain_matching(
+        },
+        PatKind::Ref(target, m1) => {
+            changed |= extend_with_matching(
+                target,
                 start,
                 alternatives,
-                |k| matches!(k, PatKind::Tuple(ps2) if eq_pre_post(ps1, ps2, idx)),
-                |k| always_pat!(k, PatKind::Tuple(mut ps) => ps.swap_remove(idx)),
+                true,
+                |k| matches!(k, PatKind::Ref(_, m2) if m1 == m2),
+                |k| always_pat!(k, PatKind::Ref(p, _) => p),
             );
-            extend_with_tail_or(&mut ps1[idx], tail_or, false)
-        }),
-        PatKind::TupleStruct(path1, ps1) => (0..ps1.len()).any(|idx| {
-            let tail_or = drain_matching(
+        },
+        PatKind::Ident(b1, i1, Some(target)) => {
+            changed |= extend_with_matching(
+                target,
                 start,
                 alternatives,
-                |k| {
-                    matches!(k, PatKind::TupleStruct(path2, ps2)
+                true,
+                |k| matches!(k, PatKind::Ident(b2, i2, Some(_)) if b1 == b2 && eq_id(*i1, *i2)),
+                |k| always_pat!(k, PatKind::Ident(_, _, Some(p)) => p),
+            );
+        },
+        PatKind::Slice(ps1) => {
+            for idx in 0..ps1.len() {
+                let tail_or = drain_matching(
+                    start,
+                    alternatives,
+                    |k| matches!(k, PatKind::Slice(ps2) if eq_pre_post(ps1, ps2, idx)),
+                    |k| always_pat!(k, PatKind::Slice(mut ps) => ps.swap_remove(idx)),
+                );
+                changed |= extend_with_tail_or(&mut ps1[idx], tail_or, false);
+            }
+        },
+        PatKind::Tuple(ps1) => {
+            for idx in 0..ps1.len() {
+                let tail_or = drain_matching(
+                    start,
+                    alternatives,
+                    |k| matches!(k, PatKind::Tuple(ps2) if eq_pre_post(ps1, ps2, idx)),
+                    |k| always_pat!(k, PatKind::Tuple(mut ps) => ps.swap_remove(idx)),
+                );
+                changed |= extend_with_tail_or(&mut ps1[idx], tail_or, false);
+            }
+        },
+        PatKind::TupleStruct(path1, ps1) => {
+            for idx in 0..ps1.len() {
+                let tail_or = drain_matching(
+                    start,
+                    alternatives,
+                    |k| {
+                        matches!(k, PatKind::TupleStruct(path2, ps2)
                         if eq_path(path1, path2) && eq_pre_post(ps1, ps2, idx))
-                },
-                |k| always_pat!(k, PatKind::TupleStruct(_, mut ps) => ps.swap_remove(idx)),
-            );
-            extend_with_tail_or(&mut ps1[idx], tail_or, false)
-        }),
-        PatKind::Struct(path1, fps1, rest1) => (0..fps1.len()).any(|idx| {
-            let pos_in_2 = std::cell::Cell::new(None);
-            let tail_or = drain_matching(
-                start,
-                alternatives,
-                |k| {
-                    matches!(k, PatKind::Struct(path2, fps2, rest2)
-                    if rest1 == rest2
-                    && eq_path(path1, path2)
-                    && fps1.len() == fps2.len()
-                    && fps1.iter().enumerate().all(|(idx_1, fp1)| {
-                        if idx_1 == idx {
-                            let pos = fps2.iter().position(|fp2| eq_id(fp1.ident, fp2.ident));
-                            pos_in_2.set(pos);
-                            pos.is_some()
-                        } else {
-                            fps2.iter().any(|fp2| eq_field_pat(fp1, fp2))
-                        }
-                    }))
-                },
-                |k| {
-                    always_pat!(k, PatKind::Struct(_, mut fps, _)
-                        => fps.swap_remove(pos_in_2.take().unwrap()).pat
-                    )
-                },
-            );
-            extend_with_tail_or(&mut fps1[idx].pat, tail_or, false)
-        }),
-    };
+                    },
+                    |k| always_pat!(k, PatKind::TupleStruct(_, mut ps) => ps.swap_remove(idx)),
+                );
+                changed |= extend_with_tail_or(&mut ps1[idx], tail_or, false);
+            }
+        },
+        PatKind::Struct(path1, fps1, rest1) => {
+            for idx in 0..fps1.len() {
+                let pos_in_2 = std::cell::Cell::new(None);
+                let tail_or = drain_matching(
+                    start,
+                    alternatives,
+                    |k| {
+                        matches!(k, PatKind::Struct(path2, fps2, rest2)
+                        if rest1 == rest2
+                        && eq_path(path1, path2)
+                        && fps1.len() == fps2.len()
+                        && fps1.iter().enumerate().all(|(idx_1, fp1)| {
+                            if idx_1 == idx {
+                                let pos = fps2.iter().position(|fp2| eq_id(fp1.ident, fp2.ident));
+                                pos_in_2.set(pos);
+                                pos.is_some()
+                            } else {
+                                fps2.iter().any(|fp2| eq_field_pat(fp1, fp2))
+                            }
+                        }))
+                    },
+                    |k| {
+                        always_pat!(k, PatKind::Struct(_, mut fps, _)
+                            => fps.swap_remove(pos_in_2.take().unwrap()).pat
+                        )
+                    },
+                );
+                changed |= extend_with_tail_or(&mut fps1[idx].pat, tail_or, false);
+            }
+        },
+    }
 
     alternatives[focus_idx].kind = focus_kind;
     changed
