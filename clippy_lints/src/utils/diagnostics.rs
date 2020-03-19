@@ -6,7 +6,7 @@ use rustc_lint::{LateContext, Lint, LintContext};
 use rustc_span::source_map::{MultiSpan, Span};
 use std::env;
 
-fn docs_link(db: &mut DiagnosticBuilder<'_>, lint: &'static Lint) {
+pub fn docs_link(db: &mut DiagnosticBuilder<'_>, lint: &'static Lint) {
     if env::var("CLIPPY_DISABLE_DOCS_LINKS").is_err() {
         db.help(&format!(
             "for further information visit https://rust-lang.github.io/rust-clippy/{}/index.html#{}",
