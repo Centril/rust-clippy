@@ -3,7 +3,7 @@
 #![warn(clippy::unnested_or_patterns)]
 
 fn main() {
-    let x = Box::new(0);
+    let x = Some(Some(0));
     match x {
         //box 0 | (box 1) => {}, // OK
         //box ((0 | 1)) | box (2 | 3) | box 4 => {}, // OK
@@ -15,7 +15,8 @@ fn main() {
         // [0] | [1] => {},
         // Foo(0, x) | Foo(1, x) => {}, // OK.
         // IN_THE_WAY | Foo { x: 0 } | Foo { x: 1 } => {},
-        IN_THE_WAY | box 0 | box 1 => {},
+        // IN_THE_WAY | box 0 | box 1 => {}, // OK.
+        Some(Some(0) | Some(1)) => {},
         _ => {},
     }
 }
