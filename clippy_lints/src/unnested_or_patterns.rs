@@ -124,7 +124,7 @@ fn insert_necessary_parens(pat: &mut P<Pat>) {
             noop_visit_pat(pat, self);
             let target = match &mut pat.kind {
                 // `i @ a | b`, `box a | b`, and `& mut? a | b`.
-                Ident(.., Some(p)) | Box(p) | Ref(p, _) if matches!(p.kind, Or(..)) => p,
+                Ident(.., Some(p)) | Box(p) | Ref(p, _) if matches!(&p.kind, Or(ps) if ps.len() > 1) => p,
                 Ref(p, Not) if matches!(p.kind, Ident(ByValue(Mut), ..)) => p, // `&(mut x)`
                 _ => return,
             };

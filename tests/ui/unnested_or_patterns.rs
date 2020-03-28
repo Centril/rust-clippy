@@ -3,6 +3,8 @@
 #![feature(or_patterns)]
 #![feature(box_patterns)]
 #![warn(clippy::unnested_or_patterns)]
+#![allow(clippy::cognitive_complexity, clippy::match_ref_pats)]
+#![allow(unreachable_patterns, irrefutable_let_patterns, unused_variables)]
 
 fn main() {
     if let box 0 | box 2 = Box::new(0) {}
