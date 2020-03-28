@@ -1,6 +1,6 @@
 use crate::utils::ast_utils::{eq_field_pat, eq_id, eq_pat, eq_path};
 use crate::utils::{over, span_lint_and_then};
-use rustc_ast::ast::{Arm, Pat, PatKind, PatKind::*, DUMMY_NODE_ID};
+use rustc_ast::ast::{self, Pat, PatKind, PatKind::*, DUMMY_NODE_ID};
 use rustc_ast::mut_visit::*;
 use rustc_ast::ptr::P;
 use rustc_ast_pretty::pprust;
@@ -48,27 +48,90 @@ declare_clippy_lint! {
 declare_lint_pass!(UnnestedOrPatterns => [UNNESTED_OR_PATTERNS]);
 
 impl EarlyLintPass for UnnestedOrPatterns {
-    fn check_arm(&mut self, cx: &EarlyContext<'_>, arm: &Arm) {
-        if !cx.sess.opts.unstable_features.is_nightly_build() {
-            // User cannot do `#![feature(or_patterns)]`, so bail.
-            return;
-        }
-
-        // Transform all unnested or-patterns into nested ones.
-        let mut pat = P(arm.pat.clone());
-        if !unnest_or_patterns(&mut pat) {
-            // There were none, so quit.
-            return;
-        }
-        span_lint_and_then(cx, UNNESTED_OR_PATTERNS, pat.span, "unnested or-patterns", |db| {
-            db.span_suggestion_verbose(
-                pat.span,
-                "nest the patterns",
-                pprust::pat_to_string(&pat),
-                Applicability::MachineApplicable,
-            );
-        });
+    fn check_arm(&mut self, cx: &EarlyContext<'_>, a: &ast::Arm) {
+        lint_unnested_or_patterns(cx, &a.pat);
     }
+
+    fn check_expr(&mut self, cx: &EarlyContext<'_>, e: &ast::Expr) {
+        if let ast::ExprKind::Let(pat, _) = &e.kind {
+            lint_unnested_or_patterns(cx, pat);
+        }
+    }
+
+    fn check_param(&mut self, cx: &EarlyContext<'_>, p: &ast::Param) {
+        lint_unnested_or_patterns(cx, &p.pat);
+    }
+
+    fn check_local(&mut self, cx: &EarlyContext<'_>, l: &ast::Local) {
+        lint_unnested_or_patterns(cx, &l.pat);
+    }
+}
+
+fn lint_unnested_or_patterns(cx: &EarlyContext<'_>, pat: &Pat) {
+    if !cx.sess.opts.unstable_features.is_nightly_build() {
+        // User cannot do `#![feature(or_patterns)]`, so bail.
+        return;
+    }
+
+    if let Ident(.., None) | Lit(_) | Wild | Path(..) | Range(..) | Rest | MacCall(_) = pat.kind {
+        // This is a leaf pattern, so cloning is unprofitable.
+        return;
+    }
+
+    let mut pat = P(pat.clone());
+
+    // Nix all the paren patterns everywhere so that they aren't in our way.
+    remove_all_parens(&mut pat);
+
+    // Transform all unnested or-patterns into nested ones, and if there were none, quit.
+    if !unnest_or_patterns(&mut pat) {
+        return;
+    }
+
+    span_lint_and_then(cx, UNNESTED_OR_PATTERNS, pat.span, "unnested or-patterns", |db| {
+        insert_necessary_parens(&mut pat);
+        db.span_suggestion_verbose(
+            pat.span,
+            "nest the patterns",
+            pprust::pat_to_string(&pat),
+            Applicability::MachineApplicable,
+        );
+    });
+}
+
+/// Remove all `(p)` patterns in `pat`.
+fn remove_all_parens(pat: &mut P<Pat>) {
+    struct Visitor;
+    impl MutVisitor for Visitor {
+        fn visit_pat(&mut self, pat: &mut P<Pat>) {
+            noop_visit_pat(pat, self);
+            let inner = match &mut pat.kind {
+                Paren(i) => mem::replace(&mut i.kind, Wild),
+                _ => return,
+            };
+            pat.kind = inner;
+        }
+    }
+    Visitor.visit_pat(pat);
+}
+
+/// Insert parens where necessary according to Rust's precedence rules for patterns.
+fn insert_necessary_parens(pat: &mut P<Pat>) {
+    struct Visitor;
+    impl MutVisitor for Visitor {
+        fn visit_pat(&mut self, pat: &mut P<Pat>) {
+            use ast::{BindingMode::*, Mutability::*};
+            noop_visit_pat(pat, self);
+            let target = match &mut pat.kind {
+                // `i @ a | b`, `box a | b`, and `& mut? a | b`.
+                Ident(.., Some(p)) | Box(p) | Ref(p, _) if matches!(p.kind, Or(..)) => p,
+                Ref(p, Not) if matches!(p.kind, Ident(ByValue(Mut), ..)) => p, // `&(mut x)`
+                _ => return,
+            };
+            target.kind = Paren(P(take_pat(target)));
+        }
+    }
+    Visitor.visit_pat(pat);
 }
 
 /// Unnest or-patterns `p0 | ... | p1` in the pattern `pat`.
@@ -88,11 +151,32 @@ fn unnest_or_patterns(pat: &mut P<Pat>) -> bool {
                 _ => return,
             };
 
+            // Collapse or-patterns directly nested in or-patterns.
+            let mut idx = 0;
+            let mut this_level_changed = false;
+            while idx < alternatives.len() {
+                let inner = match &mut alternatives[idx].kind {
+                    Or(ps) => mem::take(ps),
+                    _ => {
+                        idx += 1;
+                        continue;
+                    },
+                };
+                this_level_changed = true;
+                alternatives.splice(idx..=idx, inner);
+            }
+
             // Focus on `p_n` and then try to transform all `p_i` where `i > n`.
             let mut focus_idx = 0;
             while focus_idx < alternatives.len() {
-                self.changed |= transform_with_focus_on_idx(alternatives, focus_idx);
+                this_level_changed |= transform_with_focus_on_idx(alternatives, focus_idx);
                 focus_idx += 1;
+            }
+            self.changed |= this_level_changed;
+
+            // Deal with `Some(Some(0)) | Some(Some(1))`.
+            if this_level_changed {
+                noop_visit_pat(p, self);
             }
         }
     }
@@ -127,11 +211,12 @@ fn transform_with_focus_on_idx(alternatives: &mut Vec<P<Pat>>, focus_idx: usize)
 
     // We're trying to find whatever kind (~"constructor") we found in `alternatives[start..]`.
     match &mut focus_kind {
-        // These pattern forms do not have sub-patterns.
+        // These pattern forms are "leafs" and do not have sub-patterns.
         // Therefore they are not some form of constructor `C`,
         // with which a pattern `C(P0)` may be formed,
         // which we would want to join with other `C(Pj)`s.
-        Ident(_, _, None) | Lit(_) | Wild | Path(_, _) | Range(_, _, _) | Rest | MacCall(_) | Or(_) | Paren(_) => {},
+        Ident(.., None) | Lit(_) | Wild | Path(..) | Range(..) | Rest | MacCall(_) => {},
+        Or(_) | Paren(_) => {},
         // Transform `box x | ... | box y` into `box (x | y)`.
         //
         // The cases below until `Slice(...)` deal *singleton* products.
@@ -141,7 +226,6 @@ fn transform_with_focus_on_idx(alternatives: &mut Vec<P<Pat>>, focus_idx: usize)
                 target,
                 start,
                 alternatives,
-                true,
                 |k| matches!(k, Box(_)),
                 |k| always_pat!(k, Box(p) => p),
             );
@@ -152,7 +236,6 @@ fn transform_with_focus_on_idx(alternatives: &mut Vec<P<Pat>>, focus_idx: usize)
                 target,
                 start,
                 alternatives,
-                true,
                 |k| matches!(k, Ref(_, m2) if m1 == m2), // Mutabilities must match.
                 |k| always_pat!(k, Ref(p, _) => p),
             );
@@ -163,7 +246,6 @@ fn transform_with_focus_on_idx(alternatives: &mut Vec<P<Pat>>, focus_idx: usize)
                 target,
                 start,
                 alternatives,
-                true,
                 // Binding names must match.
                 |k| matches!(k, Ident(b2, i2, Some(_)) if b1 == b2 && eq_id(*i1, *i2)),
                 |k| always_pat!(k, Ident(_, _, Some(p)) => p),
@@ -184,7 +266,7 @@ fn transform_with_focus_on_idx(alternatives: &mut Vec<P<Pat>>, focus_idx: usize)
                     |k| matches!(k, Slice(ps2) if eq_pre_post(ps1, ps2, idx)),
                     |k| always_pat!(k, Slice(mut ps) => ps.swap_remove(idx)),
                 );
-                changed |= extend_with_tail_or(&mut ps1[idx], tail_or, false);
+                changed |= extend_with_tail_or(&mut ps1[idx], tail_or);
             }
         },
         // Transform `(pre, x, post) | ... | (pre, y, post)` into `(pre, x | y, post]`.
@@ -196,7 +278,7 @@ fn transform_with_focus_on_idx(alternatives: &mut Vec<P<Pat>>, focus_idx: usize)
                     |k| matches!(k, Tuple(ps2) if eq_pre_post(ps1, ps2, idx)),
                     |k| always_pat!(k, Tuple(mut ps) => ps.swap_remove(idx)),
                 );
-                changed |= extend_with_tail_or(&mut ps1[idx], tail_or, false);
+                changed |= extend_with_tail_or(&mut ps1[idx], tail_or);
             }
         },
         // Transform `S(pre, x, post) | ... | S(pre, y, post)` into `S(pre, x | y, post]`.
@@ -211,7 +293,7 @@ fn transform_with_focus_on_idx(alternatives: &mut Vec<P<Pat>>, focus_idx: usize)
                     },
                     |k| always_pat!(k, TupleStruct(_, mut ps) => ps.swap_remove(idx)),
                 );
-                changed |= extend_with_tail_or(&mut ps1[idx], tail_or, false);
+                changed |= extend_with_tail_or(&mut ps1[idx], tail_or);
             }
         },
         // Here we focusing on a record pattern `S { fp_0, ..., fp_n }`.
@@ -248,7 +330,7 @@ fn transform_with_focus_on_idx(alternatives: &mut Vec<P<Pat>>, focus_idx: usize)
                         )
                     },
                 );
-                changed |= extend_with_tail_or(&mut fps1[idx].pat, tail_or, false);
+                changed |= extend_with_tail_or(&mut fps1[idx].pat, tail_or);
             }
         },
     }
@@ -268,26 +350,9 @@ fn take_pat(from: &mut Pat) -> Pat {
     mem::replace(from, dummy)
 }
 
-/// Flatten all immediately nested parenthesis in `pat`.
-fn flatten_paren_in(pat: &mut Pat) {
-    let mut curr = take_pat(pat);
-    while let Pat { kind: Paren(pat), .. } = curr {
-        curr = pat.into_inner();
-    }
-    *pat = curr;
-}
-
-/// Peel through all immediately nested parenthesis in `pat` returning a reference to the inner one.
-fn peel_paren(mut curr: &Pat) -> &Pat {
-    while let Paren(p) = &curr.kind {
-        curr = &p;
-    }
-    curr
-}
-
 /// Extend `target` as an or-pattern with the alternatives
 /// in `tail_or` if there are any and return if there were.
-fn extend_with_tail_or(target: &mut Pat, tail_or: Vec<P<Pat>>, needs_paren: bool) -> bool {
+fn extend_with_tail_or(target: &mut Pat, tail_or: Vec<P<Pat>>) -> bool {
     fn extend(target: &mut Pat, mut tail_or: Vec<P<Pat>>) {
         match target {
             // On an existing or-pattern in the target, append to it.
@@ -303,14 +368,8 @@ fn extend_with_tail_or(target: &mut Pat, tail_or: Vec<P<Pat>>, needs_paren: bool
 
     let changed = !tail_or.is_empty();
     if changed {
-        // Unwrap all parens in target first.
-        flatten_paren_in(target);
         // Extend the target.
         extend(target, tail_or);
-        if needs_paren {
-            // e.g., `box 0 | 1` needs to become `box (0 | 1)`.
-            target.kind = Paren(P(take_pat(target)));
-        }
     }
     changed
 }
@@ -325,15 +384,12 @@ fn drain_matching(
 ) -> Vec<P<Pat>> {
     let mut tail_or = vec![];
     let mut idx = 0;
-    for mut pat in alternatives.drain_filter(|p| {
+    for pat in alternatives.drain_filter(|p| {
         // Check if we should extract, but only if `idx >= start`.
         idx += 1;
-        idx > start && predicate(&peel_paren(p).kind)
+        idx > start && predicate(&p.kind)
     }) {
-        flatten_paren_in(&mut pat);
-        let mut pat = extract(pat.into_inner().kind); // Do the extraction.
-        flatten_paren_in(&mut pat);
-        tail_or.push(pat);
+        tail_or.push(extract(pat.into_inner().kind));
     }
     tail_or
 }
@@ -342,20 +398,16 @@ fn extend_with_matching(
     target: &mut Pat,
     start: usize,
     alternatives: &mut Vec<P<Pat>>,
-    needs_paren: bool,
     predicate: impl Fn(&PatKind) -> bool,
     extract: impl Fn(PatKind) -> P<Pat>,
 ) -> bool {
-    extend_with_tail_or(
-        target,
-        drain_matching(start, alternatives, predicate, extract),
-        needs_paren,
-    )
+    extend_with_tail_or(target, drain_matching(start, alternatives, predicate, extract))
 }
 
 /// Are the patterns in `ps1` and `ps2` equal save for `ps1[idx]` compared to `ps2[idx]`?
 fn eq_pre_post(ps1: &[P<Pat>], ps2: &[P<Pat>], idx: usize) -> bool {
-    ps1.len() == ps2.len()
+    ps1[idx].is_rest() == ps2[idx].is_rest() // Avoid `[x, ..] | [x, 0]` => `[x, .. | 0]`.
+        && ps1.len() == ps2.len()
         && over(&ps1[..idx], &ps2[..idx], |l, r| eq_pat(l, r))
         && over(&ps1[idx + 1..], &ps2[idx + 1..], |l, r| eq_pat(l, r))
 }
