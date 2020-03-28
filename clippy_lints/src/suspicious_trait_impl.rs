@@ -69,11 +69,10 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for SuspiciousImpl {
             let mut parent_expr = cx.tcx.hir().get_parent_node(expr.hir_id);
             while parent_expr != hir::CRATE_HIR_ID {
                 if let hir::Node::Expr(e) = cx.tcx.hir().get(parent_expr) {
-                    match e.kind {
-                        hir::ExprKind::Binary(..)
-                        | hir::ExprKind::Unary(hir::UnOp::UnNot, _)
-                        | hir::ExprKind::Unary(hir::UnOp::UnNeg, _) => return,
-                        _ => {},
+                    if let hir::ExprKind::Binary(..) | hir::ExprKind::Unary(hir::UnOp::UnNot | hir::UnOp::UnNeg, _) =
+                        e.kind
+                    {
+                        return;
                     }
                 }
                 parent_expr = cx.tcx.hir().get_parent_node(parent_expr);
@@ -188,11 +187,8 @@ impl<'a, 'tcx> Visitor<'tcx> for BinaryExprVisitor {
     type Map = Map<'tcx>;
 
     fn visit_expr(&mut self, expr: &'tcx hir::Expr<'_>) {
-        match expr.kind {
-            hir::ExprKind::Binary(..)
-            | hir::ExprKind::Unary(hir::UnOp::UnNot, _)
-            | hir::ExprKind::Unary(hir::UnOp::UnNeg, _) => self.in_binary_expr = true,
-            _ => {},
+        if let hir::ExprKind::Binary(..) | hir::ExprKind::Unary(hir::UnOp::UnNot | hir::UnOp::UnNeg, _) = expr.kind {
+            self.in_binary_expr = true
         }
 
         walk_expr(self, expr);

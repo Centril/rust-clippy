@@ -2,6 +2,8 @@
 //!
 //! - The `eq_foobar` functions test for semantic equality but ignores `NodeId`s and `Span`s.
 
+#![allow(clippy::similar_names)]
+
 use crate::utils::{both, over};
 use rustc_ast::ast::{self, *};
 use rustc_ast::ptr::P;
