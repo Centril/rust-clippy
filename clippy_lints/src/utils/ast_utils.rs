@@ -36,7 +36,7 @@ pub fn eq_pat(l: &Pat, r: &Pat) -> bool {
         (Struct(lp, lfs, lr), Struct(rp, rfs, rr)) => {
             lr == rr && eq_path(lp, rp) && unordered_over(lfs, rfs, |lf, rf| eq_field_pat(lf, rf))
         },
-        (Or(ls), Or(rs)) => ls.len() == rs.len() && ls.iter().all(|l| rs.iter().any(|r| eq_pat(l, r))),
+        (Or(ls), Or(rs)) => unordered_over(ls, rs, |l, r| eq_pat(l, r)),
         (MacCall(l), MacCall(r)) => eq_mac_call(l, r),
         _ => false,
     }
@@ -141,10 +141,7 @@ pub fn eq_expr(l: &Expr, r: &Expr) -> bool {
         (InlineAsm(_), InlineAsm(_)) => false, // Cutting some corners...
         (MacCall(l), MacCall(r)) => eq_mac_call(l, r),
         (Struct(lp, lfs, lb), Struct(rp, rfs, rb)) => {
-            eq_path(lp, rp)
-                && eq_expr_opt(lb, rb)
-                && lfs.len() == rfs.len()
-                && lfs.iter().all(|lf| rfs.iter().any(|rf| eq_field(lf, rf)))
+            eq_path(lp, rp) && eq_expr_opt(lb, rb) && unordered_over(lfs, rfs, |l, r| eq_field(l, r))
         },
         _ => false,
     }
