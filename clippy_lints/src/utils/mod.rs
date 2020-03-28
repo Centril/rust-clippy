@@ -1,6 +1,7 @@
 #[macro_use]
 pub mod sym;
 
+pub mod ast_utils;
 pub mod attrs;
 pub mod author;
 pub mod camel_case;
