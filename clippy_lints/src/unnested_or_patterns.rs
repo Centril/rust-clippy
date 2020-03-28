@@ -1,3 +1,5 @@
+#![allow(clippy::wildcard_imports, clippy::enum_glob_use)]
+
 use crate::utils::ast_utils::{eq_field_pat, eq_id, eq_pat, eq_path};
 use crate::utils::{over, span_lint_and_then};
 use rustc_ast::ast::{self, Pat, PatKind, PatKind::*, DUMMY_NODE_ID};
@@ -155,12 +157,11 @@ fn unnest_or_patterns(pat: &mut P<Pat>) -> bool {
             let mut idx = 0;
             let mut this_level_changed = false;
             while idx < alternatives.len() {
-                let inner = match &mut alternatives[idx].kind {
-                    Or(ps) => mem::take(ps),
-                    _ => {
-                        idx += 1;
-                        continue;
-                    },
+                let inner = if let Or(ps) = &mut alternatives[idx].kind {
+                    mem::take(ps)
+                } else {
+                    idx += 1;
+                    continue;
                 };
                 this_level_changed = true;
                 alternatives.splice(idx..=idx, inner);
@@ -206,137 +207,129 @@ fn transform_with_focus_on_idx(alternatives: &mut Vec<P<Pat>>, focus_idx: usize)
     // We'll focus on `alternatives[focus_idx]`,
     // so we're draining from `alternatives[focus_idx + 1..]`.
     let start = focus_idx + 1;
-    // Record whether we altered `focus_kind` or not.
-    let mut changed = false;
 
     // We're trying to find whatever kind (~"constructor") we found in `alternatives[start..]`.
-    match &mut focus_kind {
+    let changed = match &mut focus_kind {
         // These pattern forms are "leafs" and do not have sub-patterns.
         // Therefore they are not some form of constructor `C`,
         // with which a pattern `C(P0)` may be formed,
         // which we would want to join with other `C(Pj)`s.
-        Ident(.., None) | Lit(_) | Wild | Path(..) | Range(..) | Rest | MacCall(_) => {},
-        Or(_) | Paren(_) => {},
+        Ident(.., None) | Lit(_) | Wild | Path(..) | Range(..) | Rest | MacCall(_)
+        // Dealt with elsewhere.
+        | Or(_) | Paren(_) => false,
         // Transform `box x | ... | box y` into `box (x | y)`.
         //
         // The cases below until `Slice(...)` deal *singleton* products.
         // These patterns have the shape `C(p)`, and not e.g., `C(p0, ..., pn)`.
-        Box(target) => {
-            changed |= extend_with_matching(
-                target,
-                start,
-                alternatives,
-                |k| matches!(k, Box(_)),
-                |k| always_pat!(k, Box(p) => p),
-            );
-        },
+        Box(target) => extend_with_matching(
+            target, start, alternatives,
+            |k| matches!(k, Box(_)),
+            |k| always_pat!(k, Box(p) => p),
+        ),
         // Transform `&m x | ... | &m y` into `&m (x, y)`.
-        Ref(target, m1) => {
-            changed |= extend_with_matching(
-                target,
-                start,
-                alternatives,
-                |k| matches!(k, Ref(_, m2) if m1 == m2), // Mutabilities must match.
-                |k| always_pat!(k, Ref(p, _) => p),
-            );
-        },
+        Ref(target, m1) => extend_with_matching(
+            target, start, alternatives,
+            |k| matches!(k, Ref(_, m2) if m1 == m2), // Mutabilities must match.
+            |k| always_pat!(k, Ref(p, _) => p),
+        ),
         // Transform `b @ p0 | ... b @ p1` into `b @ (p0 | p1)`.
-        Ident(b1, i1, Some(target)) => {
-            changed |= extend_with_matching(
-                target,
-                start,
-                alternatives,
-                // Binding names must match.
-                |k| matches!(k, Ident(b2, i2, Some(_)) if b1 == b2 && eq_id(*i1, *i2)),
-                |k| always_pat!(k, Ident(_, _, Some(p)) => p),
-            );
-        },
+        Ident(b1, i1, Some(target)) => extend_with_matching(
+            target, start, alternatives,
+            // Binding names must match.
+            |k| matches!(k, Ident(b2, i2, Some(_)) if b1 == b2 && eq_id(*i1, *i2)),
+            |k| always_pat!(k, Ident(_, _, Some(p)) => p),
+        ),
         // Transform `[pre, x, post] | ... | [pre, y, post]` into `[pre, x | y, post]`.
         //
-        // These cases below are more tricky, as they look like `C(p_0, ..., p_n)`.
-        // Here, the idea is that we fixate on some `p_k` in `C`,
-        // allowing it to vary between two `ps1` and `ps2`,
-        // while also requiring `ps1[..n] ~ ps2[..n]` (pre) and `ps1[n + 1..] ~ ps2[n + 1..]` (post),
-        // where `~` denotes semantic equality.
-        Slice(ps1) => {
-            for idx in 0..ps1.len() {
-                let tail_or = drain_matching(
-                    start,
-                    alternatives,
-                    |k| matches!(k, Slice(ps2) if eq_pre_post(ps1, ps2, idx)),
-                    |k| always_pat!(k, Slice(mut ps) => ps.swap_remove(idx)),
-                );
-                changed |= extend_with_tail_or(&mut ps1[idx], tail_or);
-            }
-        },
+        Slice(ps1) => extend_with_matching_product(
+            ps1, start, alternatives,
+            |k, ps1, idx| matches!(k, Slice(ps2) if eq_pre_post(ps1, ps2, idx)),
+            |k| always_pat!(k, Slice(ps) => ps),
+        ),
         // Transform `(pre, x, post) | ... | (pre, y, post)` into `(pre, x | y, post]`.
-        Tuple(ps1) => {
-            for idx in 0..ps1.len() {
-                let tail_or = drain_matching(
-                    start,
-                    alternatives,
-                    |k| matches!(k, Tuple(ps2) if eq_pre_post(ps1, ps2, idx)),
-                    |k| always_pat!(k, Tuple(mut ps) => ps.swap_remove(idx)),
-                );
-                changed |= extend_with_tail_or(&mut ps1[idx], tail_or);
-            }
-        },
+        Tuple(ps1) => extend_with_matching_product(
+            ps1, start, alternatives,
+            |k, ps1, idx| matches!(k, Tuple(ps2) if eq_pre_post(ps1, ps2, idx)),
+            |k| always_pat!(k, Tuple(ps) => ps),
+        ),
         // Transform `S(pre, x, post) | ... | S(pre, y, post)` into `S(pre, x | y, post]`.
-        TupleStruct(path1, ps1) => {
-            for idx in 0..ps1.len() {
-                let tail_or = drain_matching(
-                    start,
-                    alternatives,
-                    |k| {
-                        matches!(k, TupleStruct(path2, ps2)
-                        if eq_path(path1, path2) && eq_pre_post(ps1, ps2, idx))
-                    },
-                    |k| always_pat!(k, TupleStruct(_, mut ps) => ps.swap_remove(idx)),
-                );
-                changed |= extend_with_tail_or(&mut ps1[idx], tail_or);
-            }
-        },
-        // Here we focusing on a record pattern `S { fp_0, ..., fp_n }`.
-        // In particular, for a record pattern, the order in which the field patterns is irrelevant.
-        // So when we fixate on some `ident_k: pat_k`, we try to find `ident_k` in the other pattern
-        // and check that all `fp_i` where `i ∈ ((0...n) \ k)` between two patterns are equal.
-        Struct(path1, fps1, rest1) => {
-            for idx in 0..fps1.len() {
-                let pos_in_2 = Cell::new(None); // The element `k`.
-                let tail_or = drain_matching(
-                    start,
-                    alternatives,
-                    |k| {
-                        matches!(k, Struct(path2, fps2, rest2)
-                        if rest1 == rest2 // If one struct pattern has `..` so must the other.
-                        && eq_path(path1, path2)
-                        && fps1.len() == fps2.len()
-                        && fps1.iter().enumerate().all(|(idx_1, fp1)| {
-                            if idx_1 == idx {
-                                // In the case of `k`, we merely require identical field names
-                                // so that we will transform into `ident_k: p1_k | p2_k`.
-                                let pos = fps2.iter().position(|fp2| eq_id(fp1.ident, fp2.ident));
-                                pos_in_2.set(pos);
-                                pos.is_some()
-                            } else {
-                                fps2.iter().any(|fp2| eq_field_pat(fp1, fp2))
-                            }
-                        }))
-                    },
-                    // Extract `p2_k`.
-                    |k| {
-                        always_pat!(k, Struct(_, mut fps, _)
-                            => fps.swap_remove(pos_in_2.take().unwrap()).pat
-                        )
-                    },
-                );
-                changed |= extend_with_tail_or(&mut fps1[idx].pat, tail_or);
-            }
-        },
-    }
+        TupleStruct(path1, ps1) => extend_with_matching_product(
+            ps1, start, alternatives,
+            |k, ps1, idx| matches!(
+                k,
+                TupleStruct(path2, ps2) if eq_path(path1, path2) && eq_pre_post(ps1, ps2, idx)
+            ),
+            |k| always_pat!(k, TupleStruct(_, ps) => ps),
+        ),
+        // Transform a record pattern `S { fp_0, ..., fp_n }`.
+        Struct(path1, fps1, rest1) => extend_with_struct_pat(path1, fps1, *rest1, start, alternatives),
+    };
 
     alternatives[focus_idx].kind = focus_kind;
     changed
+}
+
+/// Here we focusing on a record pattern `S { fp_0, ..., fp_n }`.
+/// In particular, for a record pattern, the order in which the field patterns is irrelevant.
+/// So when we fixate on some `ident_k: pat_k`, we try to find `ident_k` in the other pattern
+/// and check that all `fp_i` where `i ∈ ((0...n) \ k)` between two patterns are equal.
+fn extend_with_struct_pat(
+    path1: &ast::Path,
+    fps1: &mut Vec<ast::FieldPat>,
+    rest1: bool,
+    start: usize,
+    alternatives: &mut Vec<P<Pat>>,
+) -> bool {
+    (0..fps1.len()).any(|idx| {
+        let pos_in_2 = Cell::new(None); // The element `k`.
+        let tail_or = drain_matching(
+            start,
+            alternatives,
+            |k| {
+                matches!(k, Struct(path2, fps2, rest2)
+                if rest1 == *rest2 // If one struct pattern has `..` so must the other.
+                && eq_path(path1, path2)
+                && fps1.len() == fps2.len()
+                && fps1.iter().enumerate().all(|(idx_1, fp1)| {
+                    if idx_1 == idx {
+                        // In the case of `k`, we merely require identical field names
+                        // so that we will transform into `ident_k: p1_k | p2_k`.
+                        let pos = fps2.iter().position(|fp2| eq_id(fp1.ident, fp2.ident));
+                        pos_in_2.set(pos);
+                        pos.is_some()
+                    } else {
+                        fps2.iter().any(|fp2| eq_field_pat(fp1, fp2))
+                    }
+                }))
+            },
+            // Extract `p2_k`.
+            |k| always_pat!(k, Struct(_, mut fps, _) => fps.swap_remove(pos_in_2.take().unwrap()).pat),
+        );
+        extend_with_tail_or(&mut fps1[idx].pat, tail_or)
+    })
+}
+
+/// Like `extend_with_matching` but for products with > 1 factor, e.g., `C(p_0, ..., p_n)`.
+/// Here, the idea is that we fixate on some `p_k` in `C`,
+/// allowing it to vary between two `targets` and `ps2` (returned by `extract`),
+/// while also requiring `ps1[..n] ~ ps2[..n]` (pre) and `ps1[n + 1..] ~ ps2[n + 1..]` (post),
+/// where `~` denotes semantic equality.
+fn extend_with_matching_product(
+    targets: &mut Vec<P<Pat>>,
+    start: usize,
+    alternatives: &mut Vec<P<Pat>>,
+    predicate: impl Fn(&PatKind, &[P<Pat>], usize) -> bool,
+    extract: impl Fn(PatKind) -> Vec<P<Pat>>,
+) -> bool {
+    (0..targets.len()).any(|idx| {
+        let tail_or = drain_matching(
+            start,
+            alternatives,
+            |k| predicate(k, targets, idx),
+            |k| extract(k).swap_remove(idx),
+        );
+        extend_with_tail_or(&mut targets[idx], tail_or)
+    })
 }
 
 /// Extract the pattern from the given one and replace it with `Wild`.

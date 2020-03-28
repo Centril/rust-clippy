@@ -2,7 +2,7 @@
 //!
 //! - The `eq_foobar` functions test for semantic equality but ignores `NodeId`s and `Span`s.
 
-#![allow(clippy::similar_names)]
+#![allow(clippy::similar_names, clippy::wildcard_imports, clippy::enum_glob_use)]
 
 use crate::utils::{both, over};
 use rustc_ast::ast::{self, *};
@@ -140,7 +140,6 @@ pub fn eq_expr(l: &Expr, r: &Expr) -> bool {
         (Range(lf, lt, ll), Range(rf, rt, rl)) => ll == rl && eq_expr_opt(lf, rf) && eq_expr_opt(lt, rt),
         (AddrOf(lbk, lm, le), AddrOf(rbk, rm, re)) => lbk == rbk && lm == rm && eq_expr(le, re),
         (Path(lq, lp), Path(rq, rp)) => both(lq, rq, |l, r| eq_qself(l, r)) && eq_path(lp, rp),
-        (LlvmInlineAsm(_), LlvmInlineAsm(_)) => false, // Cutting some corners...
         (MacCall(l), MacCall(r)) => eq_mac_call(l, r),
         (Struct(lp, lfs, lb), Struct(rp, rfs, rb)) => {
             eq_path(lp, rp) && eq_expr_opt(lb, rb) && unordered_over(lfs, rfs, |l, r| eq_field(l, r))
@@ -211,7 +210,6 @@ pub fn eq_item_kind(l: &ItemKind, r: &ItemKind) -> bool {
             both(&l.abi, &r.abi, |l, r| eq_str_lit(l, r))
                 && over(&l.items, &r.items, |l, r| eq_item(l, r, eq_foreign_item_kind))
         },
-        (GlobalAsm(_), GlobalAsm(_)) => false, // Cutting corners..
         (TyAlias(ld, lg, lb, lt), TyAlias(rd, rg, rb, rt)) => {
             eq_defaultness(*ld, *rd)
                 && eq_generics(lg, rg)

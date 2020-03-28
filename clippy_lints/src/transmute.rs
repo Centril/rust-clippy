@@ -349,8 +349,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for Transmute {
                             }
                         },
                     ),
-                    (ty::Float(_), ty::Ref(..) | ty::RawPtr(_))
-                    | (ty::Char, ty::Ref(..) | ty::RawPtr(_)) => span_lint(
+                    (ty::Float(_) | ty::Char, ty::Ref(..) | ty::RawPtr(_)) => span_lint(
                         cx,
                         WRONG_TRANSMUTE,
                         e.span,
