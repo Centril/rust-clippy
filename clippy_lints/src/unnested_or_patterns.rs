@@ -49,6 +49,11 @@ declare_lint_pass!(UnnestedOrPatterns => [UNNESTED_OR_PATTERNS]);
 
 impl EarlyLintPass for UnnestedOrPatterns {
     fn check_arm(&mut self, cx: &EarlyContext<'_>, arm: &Arm) {
+        if !cx.sess.opts.unstable_features.is_nightly_build() {
+            // User cannot do `#![feature(or_patterns)]`, so bail.
+            return;
+        }
+
         // Transform all unnested or-patterns into nested ones.
         let mut pat = P(arm.pat.clone());
         if !unnest_or_patterns(&mut pat) {
